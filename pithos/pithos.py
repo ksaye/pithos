@@ -28,6 +28,11 @@ import urllib.parse
 import urllib.request
 from enum import Enum
 
+#ksaye
+from urllib.request import urlretrieve
+from azure.storage.blob import BlobServiceClient        # azure-storage-blob 12.8.0
+logFile = open("/tmp/log.txt", 'w')
+
 import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GstAudio', '1.0')
@@ -72,6 +77,16 @@ RATING_BG_SVG = '''
 8 l 16.9257812,0 0,-16.9277 a 12,12 0 0 0 -8,-3.0723 z"
 style="fill:{bg}" /></g></svg>
 '''
+
+#ksaye
+myCurrentChannel = None
+myCurrentChannels = []
+myCurrentVolume = None
+blobStorageAccount = 'kevinsayazstorage'
+blobStorageKey = 'YJoR************ROyTA=='
+blobStorageContainer = 'music'
+blobServiceClient = BlobServiceClient(account_url="https://" + blobStorageAccount + ".blob.core.windows.net", credential=blobStorageKey)
+blobContainerClient = blobServiceClient.get_container_client(blobStorageContainer)
 
 BACKGROUND_SVG = '''
 <svg><rect y="0" x="0" height="{px}" width="{px}" style="fill:{fg}" /></svg>
@@ -229,6 +244,8 @@ class PithosWindow(Gtk.ApplicationWindow):
         "player-ready": (GObject.SignalFlags.RUN_FIRST, None, (GObject.TYPE_BOOLEAN,)),
     }
 
+    #ksaye
+    global myCurrentChannels, myCurrentChannel 
     volume = Gtk.Template.Child()
     playpause_image = Gtk.Template.Child()
     statusbar = Gtk.Template.Child()
@@ -688,6 +705,8 @@ class PithosWindow(Gtk.ApplicationWindow):
             self.worker_run(get_filter_and_pin_protected_state, (), sync_checkbox)
 
     def process_stations(self, *ignore):
+        #ksaye
+        global myCurrentChannels, myCurrentChannel 
         self.stations_model.clear()
         self.stations_popover.clear()
         self.current_station = None
@@ -698,11 +717,16 @@ class PithosWindow(Gtk.ApplicationWindow):
                 self.pandora.stations.insert(1, self.pandora.stations.pop(i))
                 break
         for i, s in enumerate(self.pandora.stations):
+            #ksaye
+            myCurrentChannels.append(s.name)
+
             if s.isQuickMix and s.isCreator:
                 self.stations_model.append((s, "QuickMix", i))
             else:
                 self.stations_model.append((s, s.name, i))
             if s.id == self.current_station_id:
+                #ksaye
+                myCurrentChannel = s.name
                 logging.info("Restoring saved station: id = %s"%(s.id))
                 selected = s
         if not selected and len(self.stations_model):
@@ -714,6 +738,10 @@ class PithosWindow(Gtk.ApplicationWindow):
         else:
             # User has no stations, open dialog
             self.show_stations()
+        
+        #ksaye
+        logFile.writelines("channels are: " + str(myCurrentChannels))
+        logFile.writelines("current channel is: " + str(myCurrentChannel))
 
     @property
     def current_song(self):
@@ -758,6 +786,10 @@ class PithosWindow(Gtk.ApplicationWindow):
         self._set_player_state(PseudoGst.BUFFERING)
         self.playcount += 1
 
+        #ksaye
+        if song.is_ad == None or song.is_ad == False:
+            self.saveSong(song)
+
         self.current_song.start_time = time.time()
         self.songs_treeview.scroll_to_cell(song_index, use_align=True, row_align = 1.0)
         self.songs_treeview.set_cursor(song_index, None, 0)
@@ -767,6 +799,48 @@ class PithosWindow(Gtk.ApplicationWindow):
 
         self.emit('song-changed', song)
         self.emit('metadata-changed', song)
+    
+    #ksaye
+    def saveSong(song):
+        logFile.writelines("processing song: " + str(song))
+        
+        songDirectory = "/tmp"
+        artist = 'a' + str(hash(song.artist))
+        songName = 's' + str(hash(song.title))
+        artfname = 'j' + str(hash(song.title)) + song.artURL.split('/')[-1]
+        currentArtFile = os.path.join(songDirectory, artfname)
+        currentSongMP3l = os.path.join(songDirectory, songName) + '.mp3'
+        
+        urlretrieve(song.artURL, currentArtFile)
+        urlretrieve(song.audioUrl, currentSongMP3l)
+        
+        blobClient = blobContainerClient.get_blob_client(artist + '-' + songName.lower())
+        if (not blobClient.exists() or
+            blobClient.get_blob_properties()['metadata']['artist'] != song.artist or
+            blobClient.get_blob_properties()['metadata']['song'] != song.title or
+            blobClient.get_blob_properties()['metadata']['cover'] != artfname.lower() or
+            blobClient.get_blob_properties()['metadata']['station'] != myCurrentChannel):
+            try:
+                logFile.writelines(" uploading " + song.title + " to: " + artist + '-' + songName.lower())
+                with open(currentSongMP3l, "rb") as data:
+                    blobClient.upload_blob(data, blob_type="BlockBlob")
+                
+                blobProperties = {'artist': song.artist, 'song': song.title, 
+                    'station': myCurrentChannel, 'cover': artfname.lower()}
+                logFile.writelines(' setting: ' + str(blobProperties) + ' on the blob ' + str(blobClient.url))
+                blobClient.set_blob_metadata(blobProperties)
+
+                blobClient = blobContainerClient.get_blob_client(artfname.lower())
+                if not blobClient.exists():
+                    with open(currentArtFile, "rb") as data:
+                        blobClient.upload_blob(data, blob_type="BlockBlob")
+            except:
+                pass
+        else:
+            logFile.writelines(" not uploading " + song.name + " to: " + artist + '-' + songName.lower())
+
+        os.remove(currentSongMP3l)
+        os.remove(currentArtFile)
 
     def next_song(self, *ignore):
         if self.current_song_index is not None:
